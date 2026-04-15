@@ -6,7 +6,7 @@
 
 -----
 <div align="center">
-  <img src="https://skillicons.dev/icons?i=go,linux,docker,github,cmake&perline=5" />
+  <img src="https://skillicons.dev/icons?i=go,linux,github&perline=5" />
 </div>
 
 <p align="center">
