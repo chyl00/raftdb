@@ -4,23 +4,22 @@ import "6.824/labrpc"
 import "crypto/rand"
 import "math/big"
 
+var globalIndex int64
 
 type Clerk struct {
+	mu sync.Mutex
 	servers []*labrpc.ClientEnd
-	// You will have to modify this struct.
-}
-
-func nrand() int64 {
-	max := big.NewInt(int64(1) << 62)
-	bigx, _ := rand.Int(rand.Reader, max)
-	x := bigx.Int64()
-	return x
+	leaderId int
+	clientId int64
+	seqNum int64
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
+	ck.clientId = atomic.AddInt64(&globalIndex , 1)
+	ck.seqNum = 0
+	ck.leaderId = 0
 	return ck
 }
 
