@@ -1,8 +1,6 @@
 package kvraft
 
 import "6.824/labrpc"
-import "crypto/rand"
-import "math/big"
 import "sync/atomic"
 
 var globalIndex int64
