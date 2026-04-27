@@ -74,9 +74,9 @@ type KVServer struct {
 	maxraftstate int
 	persister    *raft.Persister
 
-	kvStore     map[string]string
-	dupTable    map[int64]lastReply
-	notifyChans map[int]notifyEntry // index -> 等待项
+	kvStore     map[string]string   // 状态机 应用raft提交的日志
+	dupTable    map[int64]lastReply // 幂等性保证
+	notifyChans map[int]notifyEntry // index -> 等待项 防止发生了leader变更
 }
 
 // ==================== RPC Handler: Get ====================

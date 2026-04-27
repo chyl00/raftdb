@@ -1,101 +1,162 @@
 package shardctrler
 
-//
-// Shardctrler clerk.
-//
-
-import "6.824/labrpc"
-import "time"
-import "crypto/rand"
-import "math/big"
+import (
+	"6.824/labrpc"
+	"crypto/rand"
+	"math/big"
+	"sync"
+	"sync/atomic"
+	"time"
+)
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
-	// Your data here.
+	servers  []*labrpc.ClientEnd
+	clientId int64
+	seqId    int64
+	leaderId int
+}
+
+// ==================== clientId 生成器 ====================
+// 64bit: timestamp(32) | random(22) | counter(10)
+
+var (
+	clientIdMu      sync.Mutex
+	clientIdLastSec int64
+	clientIdRand    int64
+	clientIdCounter int64
+)
+
+func genClientId() int64 {
+	clientIdMu.Lock()
+	defer clientIdMu.Unlock()
+	now := time.Now().Unix()
+	if now != clientIdLastSec {
+		clientIdLastSec = now
+		clientIdRand = randBits(22)
+		clientIdCounter = 0
+	} else {
+		clientIdCounter = (clientIdCounter + 1) & 0x3FF
+	}
+	return (now << 32) | (clientIdRand << 10) | clientIdCounter
+}
+
+func randBits(bits uint) int64 {
+	max := big.NewInt(1)
+	max.Lsh(max, bits)
+	n, _ := rand.Int(rand.Reader, max)
+	return n.Int64()
 }
 
 func nrand() int64 {
 	max := big.NewInt(int64(1) << 62)
 	bigx, _ := rand.Int(rand.Reader, max)
-	x := bigx.Int64()
-	return x
+	return bigx.Int64()
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
-	ck := new(Clerk)
-	ck.servers = servers
-	// Your code here.
-	return ck
+	return &Clerk{
+		servers:  servers,
+		clientId: genClientId(),
+		seqId:    0,
+		leaderId: 0,
+	}
 }
+
+func (ck *Clerk) nextSeq() int64 {
+	return atomic.AddInt64(&ck.seqId, 1)
+}
+
+// ==================== Query ====================
+// Query 是只读操作，走 Raft log 保证 linearizability
 
 func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{}
-	// Your code here.
-	args.Num = num
+	seq := ck.nextSeq()
+	args := &QueryArgs{
+		Num:      num,
+		ClientId: ck.clientId,
+		SeqId:    seq,
+	}
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply QueryReply
-			ok := srv.Call("ShardCtrler.Query", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return reply.Config
-			}
+		var reply QueryReply
+		ok := ck.servers[ck.leaderId].Call("ShardCtrler.Query", args, &reply)
+		if ok && !reply.WrongLeader && reply.Err == OK {
+			return reply.Config
 		}
-		time.Sleep(100 * time.Millisecond)
+		if ok && reply.Err == ErrTimeout {
+			// 超时：可能已 apply，继续等同一台
+			continue
+		}
+		ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// ==================== Join ====================
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
-	// Your code here.
-	args.Servers = servers
-
+	seq := ck.nextSeq()
+	args := &JoinArgs{
+		Servers:  servers,
+		ClientId: ck.clientId,
+		SeqId:    seq,
+	}
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply JoinReply
-			ok := srv.Call("ShardCtrler.Join", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
-			}
+		var reply JoinReply
+		ok := ck.servers[ck.leaderId].Call("ShardCtrler.Join", args, &reply)
+		if ok && !reply.WrongLeader && reply.Err == OK {
+			return
 		}
-		time.Sleep(100 * time.Millisecond)
+		if ok && reply.Err == ErrTimeout {
+			continue
+		}
+		ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// ==================== Leave ====================
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
-	// Your code here.
-	args.GIDs = gids
-
+	seq := ck.nextSeq()
+	args := &LeaveArgs{
+		GIDs:     gids,
+		ClientId: ck.clientId,
+		SeqId:    seq,
+	}
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply LeaveReply
-			ok := srv.Call("ShardCtrler.Leave", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
-			}
+		var reply LeaveReply
+		ok := ck.servers[ck.leaderId].Call("ShardCtrler.Leave", args, &reply)
+		if ok && !reply.WrongLeader && reply.Err == OK {
+			return
 		}
-		time.Sleep(100 * time.Millisecond)
+		if ok && reply.Err == ErrTimeout {
+			continue
+		}
+		ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
-func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
-	// Your code here.
-	args.Shard = shard
-	args.GID = gid
+// ==================== Move ====================
 
+func (ck *Clerk) Move(shard int, gid int) {
+	seq := ck.nextSeq()
+	args := &MoveArgs{
+		Shard:    shard,
+		GID:      gid,
+		ClientId: ck.clientId,
+		SeqId:    seq,
+	}
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply MoveReply
-			ok := srv.Call("ShardCtrler.Move", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
-			}
+		var reply MoveReply
+		ok := ck.servers[ck.leaderId].Call("ShardCtrler.Move", args, &reply)
+		if ok && !reply.WrongLeader && reply.Err == OK {
+			return
 		}
-		time.Sleep(100 * time.Millisecond)
+		if ok && reply.Err == ErrTimeout {
+			continue
+		}
+		ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
