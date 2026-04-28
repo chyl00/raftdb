@@ -387,8 +387,11 @@ func (kv *ShardKV) applyAdminOp(op Op) applyResult {
 		kv.config = op.Config
 
 		for i := 0; i < shardctrler.NShards; i++ {
+			// 新配置中 该分片是否属于这组
 			nowOwner := op.Config.Shards[i] == kv.gid
+			// 旧配置中 该分片是否属于这组
 			wasOwner := kv.lastConfig.Shards[i] == kv.gid
+			// 以前的旧Gid
 			prevGid := kv.lastConfig.Shards[i]
 
 			if nowOwner && !wasOwner {
