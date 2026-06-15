@@ -1,89 +1,223 @@
------
-
-# MIT 6.824: Distributed Systems (Golang)
-
-这是我对 MIT 分布式系统课程 **6.824 / 6.5840** 实验部分的个人实现。本项目通过构建一系列由浅入深的系统，深入探讨了分布式环境下的共识算法、一致性模型和容错策略。
-
------
 <div align="center">
-  <img src="https://skillicons.dev/icons?i=go,linux,github&perline=5" />
+
+# RaftDB
+
+### 基于 Raft 共识算法的分布式持久化 KV 数据库
+
+[![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue)](https://golang.org)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Status](https://img.shields.io/badge/status-WIP-yellow)]()
+
+基于 [MIT 6.824 (Raft Lab)](https://github.com/chyl00/MIT6.824-CYL.git) 扩展实现，支持多数据结构、日志压缩与快照、线性一致读写。
+
 </div>
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Concurrency-Goroutines-00ADD8?style=for-the-badge&logo=go" />
-  <img src="https://img.shields.io/badge/Network-RPC-FFD700?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/Protocol-Raft-red?style=for-the-badge" />
-</p>
+---
 
-## 🛠️ 实验模块详情
+## ✨ 特性 Features
 
-### Lab 1: MapReduce (分布式计算框架)
+- 🗳️ **强一致性** — 基于 Raft 协议，写操作多数派确认后提交，保证 Linearizability
+- 💾 **持久化存储** — Raft 日志与 KV 数据均落盘，节点重启数据不丢失
+- 📦 **多数据结构** — 支持 String / List / Hash / Set / SortedSet（可选）
+- 📸 **日志压缩** — 自动 Snapshot 与 InstallSnapshot，避免日志无限增长
+- 🔁 **请求去重** — ClientId + SeqNum 机制保证写操作 Exactly-Once
+- 📊 **可观测性** — Prometheus Metrics、结构化日志、集群状态查询接口
 
-实现了一个类似于 Google MapReduce 论文的分布式框架。
+---
 
-  * **Coordinator & Worker：** 构建了一个中心化的协调器，负责任务调度（Map/Reduce 任务分配）和超时重试机制。
-  * **容错设计：** 能够优雅处理 Worker 崩溃的情况，确保在动态变化的集群中任务的原子性。
-  * **关键技术：** RPC 通信、Go 共享内存并发模型、文件系统原子重命名。
+## 📐 架构 Architecture
 
-### Lab 2: Raft 共识算法 (核心)
+```
+┌─────────────┐
+│   Client     │
+└──────┬───────┘
+       │ RPC (Get/Put/...)
+       ▼
+┌─────────────────────────────┐
+│         KVServer Layer        │
+│  - 请求去重 (ClientId/SeqNum) │
+│  - Leader重定向                │
+│  - 线性一致读策略               │
+└──────┬────────────────────────┘
+       │ rf.Start(cmd) / applyCh
+       ▼
+┌─────────────────────────────┐
+│         Raft Layer            │
+│  - 选举 / 日志复制 / 心跳       │
+│  - 持久化 (term/votedFor/log) │
+│  - Snapshot/InstallSnapshot   │
+└──────┬────────────────────────┘
+       │ persist / restore
+       ▼
+┌─────────────────────────────┐
+│       Storage Engine          │
+│  (BoltDB / BadgerDB / Pebble) │
+│  - raft日志区                  │
+│  - kv数据区                    │
+│  - 元数据区                    │
+└─────────────────────────────┘
+```
 
-从零实现 Raft 强一致性协议，这是后续所有分布式服务的基础。
+---
 
-  * **Leader Election：** 基于任期（Term）和心跳机制的领导者选举。
-  * **Log Replication：** 确保所有节点日志的一致性，处理网络分区与日志冲突。
-  * **Persistence：** 实现状态持久化，模拟服务器故障重启后的状态恢复。
-  * **Log Compaction：** 基于 Snapshot 的日志压缩，解决日志无限增长问题。
+## 📋 功能需求 Functional Requirements
 
-### Lab 3: Fault-tolerant KV Service
+### 数据模型
 
-基于 Raft 构建了一个可用的、强一致性的键值存储服务。
+Key 为 `string`（长度 ≤ 1KB），Value 支持以下类型：
 
-  * **Linearizability：** 确保客户端看到的执行顺序符合线性一致性。
-  * **Duplicate Detection：** 通过客户端请求 ID 识别，解决网络重试导致的重复提案问题。
+| 类型 | 说明 | 支持操作 |
+|---|---|---|
+| String | 普通字符串/二进制 | `GET` `SET` `APPEND` `INCR` `DEL` |
+| List | 双向链表 | `LPUSH` `RPUSH` `LPOP` `RPOP` `LRANGE` |
+| Hash | 字段-值映射 | `HSET` `HGET` `HDEL` `HGETALL` |
+| Set | 无序唯一集合 | `SADD` `SREM` `SMEMBERS` `SISMEMBER` |
+| SortedSet *(可选)* | 带权重有序集合 | `ZADD` `ZRANGE` `ZSCORE` |
 
-### Lab 4: Sharded KV Service (分片集群)
+所有 Value 统一编码（带类型标签），对类型不匹配的操作（如对 String 执行 `HSET`）返回明确错误。
 
-将 KV 服务扩展为支持横向缩容的分布式分片系统。
+### 一致性与共识
 
-  * **Shard Controller：** 负责分片在副本组之间的负载均衡。
-  * **Shard Migration：** 在不停止服务的前提下，实现分片数据在不同集群间的平滑迁移。
+- 所有写操作必须通过 Raft 日志复制到多数节点后才能应用到状态机
+- 读操作默认线性一致（Linearizable Read），可降级为 Leader 本地读 / ReadIndex / Lease Read
+- 客户端请求携带 `ClientId + SeqNum`，状态机层去重
 
------
+### 持久化
 
-## 🚀 性能优化与亮点
+- Raft 的 `currentTerm`、`votedFor`、日志条目持久化，重启可恢复
+- KV 数据落盘，不依赖内存常驻全量数据
 
-  * **精细锁粒度：** 避免了 Raft 实现中常见的死锁问题，通过分析并发竞争点（Race Condition）优化了锁的持有时间。
-  * **RPC 高性能调用：** 采用 Go 原生 `net/rpc` 结合 `Channels` 实现异步处理模型。
-  * **健壮性测试：** 通过了数千次 `go test -race` 压力测试，包括网络延迟、丢包、节点频繁宕机等极端情况。
+### 日志压缩 / 快照
 
------
+- 日志超过阈值时触发状态机 Snapshot
+- Snapshot 包含：全量 KV 数据 + 去重表（ClientId→SeqNum）+ lastApplied index/term
+- Leader 对落后过多的 Follower 发送 InstallSnapshot
 
-## 📦 如何运行
+### 集群管理
 
-1.  **克隆仓库：**
+- 支持成员变更（Joint Consensus 或单步变更）
+- Leader 选举、心跳、故障自动切换
+- 提供集群状态查询接口
 
-    ```bash
-    git clone https://github.com/chyl00/MIT6.824-CYL.git
-    cd MIT6.824-CYL/src
-    ```
+### 客户端接口
 
-2.  **运行 MapReduce 示例：**
+```go
+Get(key string) (Value, error)
+Put(key string, value Value) error
+Delete(key string) error
 
-    ```bash
-    go run mrcoordinator.go pg-*.txt 
-    go run mrworker.go wc.so
-    ```
+// 数据结构专用操作
+LPush(key string, val string) error
+HSet(key, field, val string) error
+SAdd(key string, members ...string) error
+```
 
-3.  **运行测试套件：**
+- 支持批量操作（Batch/Pipeline）
+- 客户端自动重试 + Leader 发现/重定向
 
-    ```bash
-    cd ./test_mr.sh
-    ```
+---
 
------
+## ⚙️ 非功能需求 Non-Functional Requirements
 
-## ⚠️ 声明 (Academic Integrity)
+| 维度 | 要求 |
+|---|---|
+| **可靠性** | 少数节点（< N/2）宕机不影响可用性；落盘数据断电重启不丢失；CRC 校验防静默错误 |
+| **性能** | 本地读 < 1ms；线性一致读 < raft 心跳周期；支持 Batching/Pipelining |
+| **可观测性** | Prometheus Metrics（QPS/延迟/日志长度/Leader切换）；结构化日志；调试接口 |
+| **可测试性** | Raft 核心状态转换单元测试；网络分区/丢包/重启集成测试；`go test -race` |
+| **安全性** *(可选)* | 节点间 TLS；客户端 Token / mTLS 鉴权 |
 
-本项目代码仅用于个人学习记录和技术展示。如果你正在修读 MIT 6.824 或相关课程，**请务必遵守学术诚信准则**，不要直接复制或参考代码实现。
+---
 
------
+## 🗂️ 数据编码规范
+
+### Value 封装
+
+```go
+type ValueType uint8
+
+const (
+    TypeString ValueType = iota
+    TypeList
+    TypeHash
+    TypeSet
+    TypeZSet
+)
+
+type Value struct {
+    Type ValueType
+    Data []byte // gob/protobuf 序列化
+}
+```
+
+### Raft 日志指令封装
+
+```go
+type Op struct {
+    OpType   string // "Put","Get","LPush","HSet","SAdd",...
+    Key      string
+    Args     []string
+    ClientId int64
+    SeqNum   int64
+}
+```
+
+### 存储 Key 命名规范
+
+| 前缀 | 用途 |
+|---|---|
+| `r/log/<index>` | Raft 日志条目 |
+| `r/meta` | term / votedFor / lastIncludedIndex |
+| `kv/<key>` | 业务 KV 数据 |
+| `dedup/<clientId>` | 客户端去重表 |
+
+---
+
+## 🛣️ 开发路线 Roadmap
+
+- [ ] **M0** — 跑通 6.824 lab2 (Raft)，通过官方测试（含网络分区/重启）
+- [ ] **M1** — 跑通 lab3（内存 KV + 线性一致），单类型 String，并发测试通过
+- [ ] **M2** — Raft 持久化改造，集成嵌入式存储引擎
+- [ ] **M3** — KV 数据持久化，重启后状态机数据完整
+- [ ] **M4** — Snapshot / 日志压缩，InstallSnapshot 正常工作
+- [ ] **M5** — 多数据结构支持（List/Hash/Set）
+- [ ] **M6** — 性能优化（Batching、ReadIndex/Lease Read），压测达标
+- [ ] **M7** — 可观测性与运维（Metrics、日志、集群管理接口）
+- [ ] **M8** *(可选)* — 集群成员变更 / TLS / 鉴权
+
+---
+
+## ⚠️ 关键设计约束
+
+1. **顺序应用** — 状态机严格按 Raft committed 顺序单线程 Apply
+2. **幂等性** — List/Set 等非天然幂等操作依赖 ClientId+SeqNum 去重，去重表随 Snapshot 持久化
+3. **快照一致性** — 生成 Snapshot 时与 Apply 流程同步，避免数据竞争
+4. **类型安全** — 类型不匹配操作返回明确错误，而非 panic 或静默覆盖
+5. **I/O 解耦** — Snapshot/Compaction 的磁盘 IO 不应阻塞 Raft 心跳
+
+---
+
+## 🧪 测试计划
+
+- **单元测试**：Raft 状态转换、Value 编解码、数据结构边界条件
+- **集成测试**：扩展 6.824 网络模拟框架，覆盖 Leader 崩溃日志一致性、网络分区脑裂防护、Snapshot 期间并发读写、重启数据完整性
+- **压力测试**：高并发写入吞吐与延迟基线
+- **混沌测试** *(可选)*：随机延迟、丢包、磁盘满故障注入
+
+---
+
+## 🔧 技术选型
+
+| 组件 | 推荐方案 | 备注 |
+|---|---|---|
+| 存储引擎 | BadgerDB / BoltDB | BadgerDB 写性能更优且自带快照；BoltDB 更简单稳定 |
+| 序列化 | Protobuf | 跨语言高性能；初期可用 gob 快速验证 |
+| RPC 框架 | gRPC | 替代 6.824 自带 labrpc，更贴近生产环境 |
+| Metrics | Prometheus + Grafana | 标准可观测性方案 |
+| 配置管理 | YAML + 环境变量覆盖 | 便于多环境部署 |
+
+---
+
+## 📄 License
+
+MIT 该项目仅用于学习 ！！！
